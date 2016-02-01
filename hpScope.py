@@ -3,6 +3,7 @@
 import serial
 import time
 import struct
+import matplotlib.pyplot as plt
 
 # Assumes the following settings for the 54652B RS-232 Interface
 # Baud-rate = 19200
@@ -22,10 +23,12 @@ class hpScope:
 	COMMAND_DIGITIZE_CH1			= ':DIGITIZE CHANNEL1'
 	COMMAND_DIGITIZE_CH2			= ':DIGITIZE CHANNEL2'
 	COMMAND_DIGITIZE_BOTH 			= ':DIG CHAN1,CHAN2'
-	COMMAND_SET_FORMAT				= ':WAVEFORM:FORMAT WORD'
+	COMMAND_SET_FORMAT				= ':WAVEFORM:FORMAT BYTE'
 	COMMAND_SET_WAVEFORM_POINTS 	= ':WAV:POIN 5000'
 	COMMAND_READ_WAVEFORM			= ':WAVEFORM:DATA?'
 	COMMAND_SET_BYTE_ORDER 			= ':WAV:BYT MSBF'
+
+	COMMAND_GET_WAVEFORM_PREAMBLE 	= ':WAV:PRE?'
 
 	COMMAND_GET_ACQUIRE_COMPLETE 	= ':ACQ:COMP?'
 
@@ -108,7 +111,6 @@ class hpScope:
 
 		return self.port.read( length )
 
-
 	def getIdentification( self ):
 		self.writeCommand( self.COMMAND_IDN )
 
@@ -133,31 +135,104 @@ class hpScope:
 		#	progress = self.getAcquireProgress()	little-endian	standard	none
 	
 
-		# Now actually try and get the waveform	little-endian	standard	none
-
+		# Now actually try and get the waveform
 		self.writeCommand( self.COMMAND_READ_WAVEFORM )
 		# HACKY
-		time.sleep(0.400)
+		time.sleep(0.600)
 
-		preamble = self.readResult( 2 )
+		header = self.readResult( 2 )
 
-		if( len(preamble) == 2 ):
-			if( preamble[0] == '#' ):
-				digitsToFollow = int( preamble[1] )
+		if( len(header) == 2 ):
+			if( header[0] == '#' ):
+				digitsToFollow = int( header[1] )
 
 				asciiLength = self.readResult( digitsToFollow )
 				numBytes = int( asciiLength )
-				print "Expecting {} bytes".format( numBytes )
+				#print "Expecting {} bytes".format( numBytes )
 
 				while( len(waveformStr) < numBytes ):
 					waveformStr += self.readResult( numBytes - len(waveformStr) )
-					print "At {} bytes".format( len(waveformStr) )
+					#print "At {} bytes".format( len(waveformStr) )
 
-				for i in range(0, numBytes, 2):
-					point = struct.unpack( '>h', waveformStr[i:i+2] )
-					waveform.append( point[0] )
+				# We need to read out the trailing linefeed as well
+				self.readResult(1)
+
+				for i in range(0, numBytes):
+					point = struct.unpack( 'B', waveformStr[i] )[0]
+					waveform.append( point )
 
 		return waveform
+
+	def makePlot( self ):
+		# Snag the actual waveform
+		points = self.getWaveform()
+
+		# Grab display information
+		preamble = self.getWaveformPreamble()
+		vDiv 	= 32 * preamble['yIncrement']
+		yOffset = (128 - preamble['yReference']) * preamble['yIncrement'] - preamble['yOrigin']
+		tDiv 	= (preamble['points'] * preamble['xIncrement']) / 10
+		tDelay  = (((preamble['points'] / 2) - preamble['xReference']) * preamble['xIncrement']) + preamble['xOrigin']
+
+		# Grab channel settings
+		#channelInfo = self.getChannelInfo()
+
+		# Scale the points, and interleave them with the timebase
+		# TODO: Double check the waveform contains as many points as we expect
+		waveform = []
+		timebase = []
+
+		for x in range( preamble['points'] ):
+			scaledPoint = ((points[x] - preamble['yReference']) * preamble['yIncrement']) + preamble['yOrigin']
+			waveform.append( scaledPoint + yOffset )
+			timebase.append( preamble['xOrigin'] + (preamble['xIncrement'] * x) )
+
+		# Draw the timebase delay
+		plt.plot( -1 * tDelay, (vDiv * -4) , 'g^' )
+
+		# Turn on the grid and set the axis ranges
+		plt.grid( True )
+		plt.xlim( preamble['xOrigin'], preamble['xOrigin'] + (preamble['xIncrement'] * preamble['points']))
+		plt.ylim( vDiv * -4, vDiv * 4 )
+
+		# Draw y-offset marker and grid line
+		plt.plot( preamble['xOrigin'] + (preamble['xIncrement'] * preamble['points']), yOffset, 'b<' )
+		plt.axhline( y=yOffset, color='b', linestyle='dotted' )
+
+		# Darken the grid lines for X and Y axis
+		plt.axvline( color='k' )
+		plt.axhline( color='k' )
+
+		plt.xticks([
+			timebase[ int(preamble['points'] * 0.1) ],
+			timebase[ int(preamble['points'] * 0.2) ],
+			timebase[ int(preamble['points'] * 0.3) ],
+			timebase[ int(preamble['points'] * 0.4) ],
+			timebase[ int(preamble['points'] * 0.5) ],
+			timebase[ int(preamble['points'] * 0.6) ],
+			timebase[ int(preamble['points'] * 0.7) ],
+			timebase[ int(preamble['points'] * 0.8) ],
+			timebase[ int(preamble['points'] * 0.9) ]
+		])
+
+		plt.yticks([
+			vDiv * -3,
+			vDiv * -2,
+			vDiv * -1,
+			vDiv *  0,
+			vDiv *  1,
+			vDiv *  2,
+			vDiv *  3
+		])
+
+		# Finally plot the waveform
+		plt.plot( timebase, waveform, color='b' )
+		
+		
+		
+
+		plt.show()
+
 
 	def run( self ):
 		return self.writeCommand( self.COMMAND_RUN )
@@ -366,3 +441,24 @@ class hpScope:
 			})
 
 		return channelInfo
+
+	def getWaveformPreamble( self ):
+		self.writeCommand( self.COMMAND_GET_WAVEFORM_PREAMBLE )
+
+		preambleASCII = self.readResult()
+		preambleSplit = preambleASCII.split(',')
+
+		preamble = {
+			'format'		: int( preambleSplit[0] ),
+			'type'			: int( preambleSplit[1] ),
+			'points'		: int( preambleSplit[2] ),
+			'count'			: int( preambleSplit[3] ),
+			'xIncrement'	: float( preambleSplit[4] ),
+			'xOrigin'		: float( preambleSplit[5] ),
+			'xReference'	: int( preambleSplit[6] ),
+			'yIncrement'	: float( preambleSplit[7] ),
+			'yOrigin'		: float( preambleSplit[8] ),
+			'yReference'	: int( preambleSplit[9] )
+		}
+
+		return preamble

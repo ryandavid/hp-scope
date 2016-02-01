@@ -6,4 +6,5 @@ scope = hpScope()
 
 scope.connect()
 print scope.getIdentification()
+scope.makePlot()
 scope.disconnect()

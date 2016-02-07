@@ -65,3 +65,5 @@ target/
 # pyenv
 .python-version
 
+# We write out plots as JSON's, so ignore them
+*.json

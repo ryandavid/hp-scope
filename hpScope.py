@@ -3,7 +3,6 @@
 import serial
 import time
 import struct
-import json
 import matplotlib.pyplot as plt
 
 # Assumes the following settings for the 54652B RS-232 Interface
@@ -29,7 +28,7 @@ class hpScope:
 	COMMAND_SET_WAVEFORM_POINTS 	= ':WAV:POIN 5000'
 	COMMAND_READ_WAVEFORM			= ':WAVEFORM:DATA?'
 	COMMAND_SET_BYTE_ORDER 			= ':WAV:BYT MSBF'
-	COMMAND_SET_WAVEFORM_SOURCE		= ':WAV:SOUR ' + CHANNEL_NUM
+	COMMAND_SET_WAVEFORM_SOURCE		= ':WAV:SOUR CHAN' + CHANNEL_NUM
 
 	COMMAND_GET_WAVEFORM_PREAMBLE 	= ':WAV:PRE?'
 
@@ -127,9 +126,15 @@ class hpScope:
 
 		return identification.strip()
 
-	def getWaveform( self, channelList ):
-		waveform = dict()
-		waveformStr = ''
+	def getWaveform( self ):
+		# Grab channel settings
+		channelInfo = self.getChannelInfo()
+
+		# Snag the actual waveform
+		channelList = []
+		for channel in channelInfo :
+			if( channelInfo[channel]['enabled'] == True ):
+				channelList.append( channel )
 
 		self.writeCommand( self.COMMAND_SET_FORMAT )
 		self.writeCommand( self.COMMAND_SET_BYTE_ORDER )
@@ -140,9 +145,11 @@ class hpScope:
 			newCommand = self.COMMAND_DIGITIZE_CHANNEL.replace( self.CHANNEL_NUM, str(channelList[0]) )
 			self.writeCommand( newCommand )
 
-
+		waveform = dict()
 		# Now actually try and get the waveform
 		for channel in channelList:
+			waveformStr = ''
+
 			#HACKY
 			time.sleep(0.400)
 
@@ -165,11 +172,9 @@ class hpScope:
 
 					asciiLength = self.readResult( digitsToFollow )
 					numBytes = int( asciiLength )
-					#print "Expecting {} bytes".format( numBytes )
 
 					while( len(waveformStr) < numBytes ):
 						waveformStr += self.readResult( numBytes - len(waveformStr) )
-						#print "At {} bytes".format( len(waveformStr) )
 
 					# We need to read out the trailing linefeed as well
 					self.readResult(1)
@@ -190,7 +195,7 @@ class hpScope:
 				scaledPoint = ((rawWaveform[i] - preamble['yReference']) * preamble['yIncrement']) + preamble['yOrigin']
 				scaledWaveform.append( scaledPoint )
 
-			waveform[ channel ] = {
+			waveform[ str(channel) ] = {
 				'format'		: preamble['format'],
 				'type'			: preamble['type'],
 				'numPoints'		: preamble['numPoints'],
@@ -203,11 +208,21 @@ class hpScope:
 				'yReference'	: preamble['yReference'],
 				'vDiv'			: vDiv,
 				'yOffset'		: yOffset,
+				'attenuation'	: channelInfo[channel]['attenuation'],
+				'vernier'		: channelInfo[channel]['vernier'],
+				'offset'		: channelInfo[channel]['offset'],
+				'impedance'		: channelInfo[channel]['impedance'],
+				'protect'		: channelInfo[channel]['protect'],
+				'coupling'		: channelInfo[channel]['coupling'],
+				'skew'			: channelInfo[channel]['skew'],
+				'probeMode'		: channelInfo[channel]['probeMode'],
+				'range'			: channelInfo[channel]['range'],
+				'bwLimit'		: channelInfo[channel]['bwLimit'],
 				'points'		: rawWaveform,
 				'scaledPoints'	: scaledWaveform
 			}
 
-		# Finally lets put together the timebase
+		# Lets put together the timebase
 		timePoints = []
 		for x in range( preamble['numPoints'] ):
 			timePoints.append( preamble['xOrigin'] + (preamble['xIncrement'] * x) )
@@ -218,27 +233,24 @@ class hpScope:
 			'tDelay'	: tDelay
 		}
 
+		# Finally lets make another 'channel' for the misc info
+		waveform['info'] = {
+			'id'		: self.getIdentification()
+		}
+
 		return waveform
 
-	def makePlot( self ):
-		# Grab channel settings
-		channelInfo = self.getChannelInfo()
-
-		# Snag the actual waveform
-		enabledChannels = []
-		for channel in channelInfo :
-			if( channelInfo[channel]['enabled'] == True ):
-				enabledChannels.append( channel )
-
-		waveforms = self.getWaveform( enabledChannels )
+	def makePlot( self, waveforms=None ):
+		if( waveforms == None ):
+			waveforms = self.getWaveform()
 
 		# Draw the timebase delay
-		plt.plot( -1 * waveforms['timebase']['tDelay'], (waveforms[1]['vDiv'] * -4) , 'g^' )
+		plt.plot( -1 * waveforms['timebase']['tDelay'], (waveforms['1']['vDiv'] * -4) , 'g^' )
 		plt.axvline( x=-1 * waveforms['timebase']['tDelay'], color='b', linestyle='dotted' )
 
 		# Turn on the grid and set the axis ranges
 		plt.grid( True )
-		plt.xlim( waveforms[1]['xOrigin'], waveforms[1]['xOrigin'] + (waveforms[1]['xIncrement'] * waveforms[1]['numPoints']))
+		plt.xlim( waveforms['1']['xOrigin'], waveforms['1']['xOrigin'] + (waveforms['1']['xIncrement'] * waveforms['1']['numPoints']))
 		#plt.ylim( waveforms[1]['vDiv'] * -4, waveforms[1]['vDiv'] * 4 )
 
 		# TODO: Draw trigger level
@@ -251,10 +263,10 @@ class hpScope:
 
 
 		# Finally plot the waveform
-		for channel in waveforms:
-			plt.plot( waveforms['timebase']['points'], waveforms[1]['scaledPoints'], color=self.plotChannelColors[ 1 ] )
-		
-		
+		for i in range( 1, self.DEFAULT_NUM_CHANNELS + 1 ):
+			if str(i) in waveforms.keys():
+				plt.plot( waveforms['timebase']['points'], waveforms[str(i)]['scaledPoints'], color=self.plotChannelColors[ i ] )
+
 		plt.show()
 
 
@@ -268,7 +280,6 @@ class hpScope:
 		self.writeCommand( self.COMMAND_GET_ACQUIRE_COMPLETE )
 
 		progressASCII = self.readResult()
-		print progressASCII
 		progress = float( progressASCII.split()[0] )
 
 		return progress / 100.0
